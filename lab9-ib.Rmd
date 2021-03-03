@@ -1,0 +1,199 @@
+---
+title: "Lab 9"
+author: "Indigo Bannister"
+date: "3/3/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(here)
+library(janitor)
+library(gt)
+library(boot)
+library(patchwork)
+library(broom)
+library(nlstools)
+```
+
+# Part 1: beautiful tables with gt
+```{r}
+# Simplify data
+disp_income <- LifeCycleSavings %>% 
+  rownames_to_column() %>% 
+  arrange(dpi) %>% 
+  head(5) %>% 
+  mutate(ddpi = ddpi/100,
+         pop15 = pop15/100,
+         pop75 = pop75/100)
+
+```
+
+```{r}
+disp_income %>% 
+  gt() %>% 
+  tab_header(title = "Life cycle savings",
+             subtitle = "5 countries with lowest per capita disposable income") %>% 
+  fmt_currency(columns = vars(dpi),
+               decimals = 2) %>% 
+  fmt_percent(columns = vars(pop15, pop75, ddpi),
+              decimals = 1) %>% 
+  fmt_number(columns = vars(sr),
+             decimals = 1) %>% 
+  tab_options(table.width = pct(80)) %>% 
+  tab_footnote(footnote = "Data averaged from 1970 - 1980",
+               location = cells_title()) %>% 
+  data_color(columns = vars(dpi),
+             colors = scales::col_numeric(
+               palette = c("orange", "red", "purple"),
+               domain = c(120, 190))) %>% 
+  cols_label(sr = "Savings ratio",
+             pop15 = "Pop < 15yr",
+             pop75 = "Pop > 75yr",
+             dpi = "Disposable $ per capita",
+             ddpi = "Disposable percent")
+
+```
+
+# Part 2: Bootstrapping
+```{r}
+# Calc some summary stats for salinity data
+hist(salinity$sal)
+
+mean(salinity$sal)
+
+t.test(salinity$sal)
+```
+```{r}
+# Prep for bootstrapping
+
+# create a function that will calculate the mean of each bootstrapped sample
+mean_fun <- function(x,i) {mean(x[i])}
+
+# Get a vector of just salinity
+sal_nc <- salinity$sal
+
+# Create the 100 bootstrap samples
+salboot_100 <- boot(sal_nc,
+                    statistic = mean_fun,
+                    R = 100)
+
+# Create 10k bootstrap samples
+salboot_10k <- boot(sal_nc,
+                    statistic = mean_fun,
+                    R = 10000)
+# Check output
+salboot_100
+salboot_10k
+
+# Look at original sample mean ($t0) and the mean of the bootstraps ($t)
+salboot_100$t0
+salboot_100$t
+```
+```{r}
+# Make vectors of the bootstrap sample means a data frame
+salboot_100_df <- data.frame(bs_mean = salboot_100$t)
+salboot_10k_df <- data.frame(bs_mean = salboot_10k$t)
+
+# Create hist of original sample
+p1 <- ggplot(data = salinity, aes(x = sal)) +
+  geom_histogram()
+
+# Create hist of 100 bootstrap
+p2 <- ggplot(data = salboot_100_df, aes(x = bs_mean)) + 
+  geom_histogram()
+
+# Create hist of 10k bootstrap
+p3 <- ggplot(data = salboot_10k_df, aes(x = bs_mean)) +
+  geom_histogram()
+
+# Use patchwork to visualize all three
+
+(p1 + p2 + p3) & theme_minimal()
+
+```
+
+```{r}
+# Use boot.ci() to find the confidence interval for the bootstrap
+boot.ci(salboot_10k, conf = 0.95)
+
+```
+
+# Part 3: Nonlinear least squares
+```{r}
+df <- read_csv(here("data", "log_growth.csv"))
+
+# Look at base data
+ggplot(data = df, aes(x = time, y = pop)) +
+  geom_point() +
+  theme_minimal() +
+  labs(x = "time (hr)", y = "population (ind)")
+
+# Look at log transformed data
+ggplot(data = df, aes(x = time, y = log(pop))) +
+  geom_point() +
+  theme_minimal() +
+  labs( x = "time (hr)", y = "ln(population)")
+```
+
+```{r}
+# Find ininitial estimates for K, A, and k
+
+# Get only first 14 hours and log transform pop to est k during exponential growth phase
+df_exp <- df %>% 
+  filter(time < 15) %>% 
+  mutate(ln_pop = log(pop))
+
+# model linear to get k estimate (slope of linear eq is the estimate of k)
+lm_k <- lm(ln_pop ~ time, data = df_exp)
+lm_k
+
+# k ~ 0.17
+
+# Estimate K ~180 (carrying capacity, ~ asymptote on right side) and A ~17 (A = (K-P0)/P0) based on initial graph
+
+```
+
+```{r}
+# Estimate parameters using nonlinear least squares
+df_nls <- nls(pop ~ K/(1 + A*exp(-r*time)),
+              data = df,
+              start = list(K = 180, A = 17, r = 0.17),
+              trace = TRUE)
+
+# See the summary
+summary(df_nls)
+```
+
+```{r}
+# Use broom:: functions to get model outputs in tidier formats
+model_out <- broom::tidy(df_nls)
+
+# To get just one
+A_est <- model_out$estimate[2]
+```
+
+```{r}
+# Visualize on top of original values
+
+# Make predictions for the population at all times in original df
+p_predict <- predict(df_nls)
+
+# Bind predictions to original data frame
+df_complete <- data.frame(df, p_predict)
+
+# Plot them
+ggplot(data = df_complete, aes(x = time, y = pop)) +
+  geom_point()+
+  geom_line(aes(x = time, y = p_predict)) +
+  theme_minimal()
+```
+
+```{r}
+# Find confidence interval for parameter estimates
+df_ci <- confint2(df_nls)
+df_ci
+```
+
